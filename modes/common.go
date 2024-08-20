@@ -1,8 +1,6 @@
 package tunnel
 
 import (
-	"bytes"
-	"encoding/gob"
 	"fmt"
 	"net"
 )
@@ -21,72 +19,40 @@ func NewTunnelArgs() TunnelArgs {
 	return TunnelArgs{}
 }
 
-type SupervisorMessageType int
+var Args = NewTunnelArgs()
 
-const (
-	createConn SupervisorMessageType = iota
-)
-
-func (w SupervisorMessageType) String() string {
-	return [...]string{"Create Connection"}[w]
-}
-func (w SupervisorMessageType) EnumIndex() int {
-	return int(w)
-}
-
-type SupervisorCommand int
-
-const (
-	AddTunnel SupervisorCommand = iota
-	RemoveTunnel
-	WriteIncomingConn
-	WriteOutgoingConn
-)
-
-func (w SupervisorCommand) String() string {
-	return [...]string{"Remove", "Close", "Write"}[w]
-}
-func (w SupervisorCommand) EnumIndex() int {
-	return int(w)
-}
-
-type SupervisorMessage struct {
-	command SupervisorCommand
-	tunnel  Tunnel
-}
-
-type Tunnel struct {
-	incoming net.Conn
-	outgoing net.Conn
-}
-
-type ClientConfigureMessage struct {
-	Target string
-}
-
-func (m *ClientConfigureMessage) GobEncode() ([]byte, error) {
-	w := new(bytes.Buffer)
-	encoder := gob.NewEncoder(w)
-	encoder.Encode(m.Target)
-
-	return w.Bytes(), nil
-}
-
-func (m *ClientConfigureMessage) GobDecode(buf []byte) error {
-	r := bytes.NewBuffer(buf)
-	decoder := gob.NewDecoder(r)
-	decoder.Decode(&m.Target)
-	return nil
-}
-
-func main() {
-	d := ClientConfigureMessage{Target: "1.2.3.4:8080"}
-	buffer := new(bytes.Buffer)
-	encoder := gob.NewEncoder(buffer)
-	encoder.Encode(d)
-	buffer = bytes.NewBuffer(buffer.Bytes())
-	e := new(ClientConfigureMessage)
-	decoder := gob.NewDecoder(buffer)
-	decoder.Decode(e)
-	fmt.Println(e)
+func handleTunnelConn(readConn net.Conn, writeConn net.Conn, finish chan int) {
+	defer func() {
+		err := recover()
+		if err != nil {
+			err = readConn.Close()
+			if err != nil {
+				fmt.Printf("readConn.Close error: %+v\n", err)
+			}
+			err = writeConn.Close()
+			if err != nil {
+				fmt.Printf("writeConn.Close error: %+v\n", err)
+			}
+			if finish != nil {
+				finish <- 1
+			}
+		}
+	}()
+	var buffer [2048]byte
+	for {
+		readSize, err := readConn.Read(buffer[:])
+		if err != nil {
+			fmt.Printf("readConn.Read error:%+v\n", err)
+			panic(err)
+		}
+		writeSize := 0
+		for writeSize < readSize {
+			n, err := writeConn.Write(buffer[writeSize:readSize])
+			if err != nil {
+				fmt.Printf("writeConn.Write error:%+v\n", err)
+				panic(err)
+			}
+			writeSize += n
+		}
+	}
 }

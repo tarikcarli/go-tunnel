@@ -1,12 +1,11 @@
 package tunnel
 
 import (
-	"bytes"
-	"encoding/gob"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -15,14 +14,12 @@ type ClientConfig struct {
 	listerner      net.Listener
 	controllerConn net.Conn
 	idleConns      []net.Conn
-	incomingConns  []net.Conn
-	outgoingConns  []net.Conn
 }
 
 var clients []ClientConfig
 
-func MakeServer(args TunnelArgs) {
-	listener, err := net.Listen("tcp", args.Host)
+func MakeServer() {
+	listener, err := net.Listen("tcp", Args.Host)
 	if err != nil {
 		fmt.Printf("net.Listen error: %+v\n", err)
 		os.Exit(1)
@@ -32,81 +29,146 @@ func MakeServer(args TunnelArgs) {
 		if err != nil {
 			fmt.Printf("listener.Accept error: %+v\n", err)
 		}
-		go handleControllerConn(conn, args)
+		fmt.Printf("%s Accept, connection: %+v\n", Args.Host, conn.RemoteAddr())
+		go handleControllerConn(conn, Args)
 	}
 }
 
-func handleControllerConn(conn net.Conn, args TunnelArgs) error {
+func handleControllerConn(conn net.Conn, args TunnelArgs) {
+	var listener net.Listener = nil
+	var err error = nil
+	var errChan = make(chan error)
+
+	defer func() {
+		err := recover()
+		close(errChan)
+		errChan = nil
+		if listener != nil {
+			err = listener.Close()
+			if err != nil {
+				fmt.Printf("listener.Close error: %+v\n", err)
+			}
+		}
+		err = conn.Close()
+		if err != nil {
+			fmt.Printf("conn.Close error: %+v\n", err)
+		}
+		var index int = -1
+		for i, client := range clients {
+			if strings.Split(client.controllerConn.RemoteAddr().String(), ":")[0] == strings.Split(conn.RemoteAddr().String(), ":")[0] {
+				index = i
+				break
+			}
+		}
+		if index != -1 {
+			clients = append(clients[:index], clients[index+1:]...)
+		}
+	}()
 	var buffer [2048]byte
 	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
-	n, err := conn.Read(buffer[:])
+
+	readSize, err := conn.Read(buffer[:4])
 	if err != nil {
 		fmt.Printf("conn.Read error: %+v\n", err)
-		return conn.Close()
+		panic(err)
 	}
-	size, err := strconv.ParseInt(string(buffer[:4]), 10, 32)
-	if err != nil {
-		fmt.Printf("strconv.ParseInt error: %+v\n", err)
-		conn.Close()
-	}
-	totalRead := n
-	for size > int64(totalRead) {
-		n, err := conn.Read(buffer[totalRead:])
+	readSize = 0
+	contentLength := binary.LittleEndian.Uint32(buffer[0:4])
+	for readSize < int(contentLength) {
+		chunkReadSize, err := conn.Read(buffer[readSize:contentLength])
 		if err != nil {
 			fmt.Printf("conn.Read error: %+v\n", err)
-			return conn.Close()
+			panic(err)
 		}
-		totalRead += n
+		readSize += chunkReadSize
 	}
-	decoder := gob.NewDecoder(bytes.NewBuffer(buffer[4:totalRead]))
-	clientConf := ClientConfigureMessage{}
-	err = decoder.Decode(&clientConf)
+
+	payload := make(map[string]string)
+	err = json.Unmarshal(buffer[:contentLength], &payload)
 	if err != nil {
-		fmt.Printf("decoder.Decode error: %+v\n", err)
-		return conn.Close()
+		fmt.Printf("json.Unmarshal error: %+v\n", err)
+		panic(err)
 	}
-	found := false
-	for _, client := range clients {
-		if strings.Split(client.controllerConn.RemoteAddr().String(), ":")[0] == strings.Split(conn.RemoteAddr().String(), ":")[0] {
-			err := client.controllerConn.Close()
-			if err != nil {
-				fmt.Printf("client.controllerConn.Close error: %+v\n", err)
-			}
-			client.controllerConn = conn
-			found = true
-		}
+	if payload["type"] != "CONFIGURE_CLIENT" {
+		fmt.Printf("PROTOCOL ERROR message %+v\n", payload)
+		panic(err)
 	}
-	listener, err := net.Listen("tcp", clientConf.Target)
+	fmt.Printf("payload: %+v\n", payload)
+	listener, err = net.Listen("tcp", payload["target"])
 	if err != nil {
 		fmt.Printf("net.Listen error: %+v\n", err)
-		return conn.Close()
+		panic(err)
 	}
-	var client *ClientConfig = nil
-	if !found {
-		client = &ClientConfig{listerner: listener, controllerConn: conn, idleConns: make([]net.Conn, 10), incomingConns: make([]net.Conn, 10), outgoingConns: make([]net.Conn, 10)}
-		clients = append(clients, *client)
+	client := ClientConfig{listerner: listener, controllerConn: conn, idleConns: make([]net.Conn, 0, 100)}
+	clients = append(clients, client)
+	for i := 0; args.MinIdleConnection-len(client.idleConns) > i; i++ {
+		sendNewConn(conn, client)
 	}
-	for {
-		for i := 0; args.MinIdleConnection > i; i++ {
-			// conn.Write() // populate idleConns
-		}
-		tunnelConn, err := listener.Accept()
-		if err != nil {
-			fmt.Printf("listener.Accept error: %+v\n", err)
-		}
-		if strings.Split(tunnelConn.RemoteAddr().String(), ":")[0] == strings.Split(conn.RemoteAddr().String(), ":")[0] {
-			client.idleConns = append(client.idleConns, tunnelConn)
-		} else {
-			if len(client.idleConns) == 0 {
-				tunnelConn.Close()
+
+	go func() {
+		buffer := [1024]byte{}
+		for {
+			conn.SetReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 10))
+			_, err = conn.Read(buffer[:])
+			if err != nil {
+				fmt.Printf("conn.Read error: %+v\n", err)
+				if errChan != nil {
+					errChan <- err
+					return
+				}
 			}
 		}
+	}()
+
+	go func() {
+		for {
+			tunnelConn, err := listener.Accept()
+			if err != nil {
+				fmt.Printf("listener.Accept error: %+v\n", err)
+				if errChan != nil {
+					errChan <- err
+				}
+				return
+			}
+			fmt.Printf("%s Accept, connection: %+v\n", payload["target"], conn.RemoteAddr())
+			if strings.Split(tunnelConn.RemoteAddr().String(), ":")[0] == strings.Split(conn.RemoteAddr().String(), ":")[0] {
+				client.idleConns = append(client.idleConns, tunnelConn)
+			} else {
+				if len(client.idleConns) == 0 {
+					err := tunnelConn.Close()
+					if err != nil {
+						fmt.Printf("tunnelConn.Close error: %+v\n", err)
+					}
+				} else {
+					idleConn := client.idleConns[0]
+					client.idleConns = append(client.idleConns[:0], client.idleConns[1:]...)
+					sendNewConn(conn, client)
+					go handleTunnelConn(tunnelConn, idleConn, nil)
+					go handleTunnelConn(idleConn, tunnelConn, nil)
+				}
+			}
+		}
+	}()
+	err = <-errChan
+	panic(err)
+}
+
+func sendNewConn(conn net.Conn, client ClientConfig) {
+	message := make(map[string]string)
+	message["type"] = "MAKE_NEW_CONNECTION"
+	buf, err := json.Marshal(message)
+	if err != nil {
+		fmt.Printf("json.Marshal error:%+v\n", err)
+		panic(err)
 	}
-}
-
-func sendMessage(conn net.Conn, messageType SupervisorMessageType) {
-
-}
-func handleClient(conn net.Conn, client *ClientConfig, args TunnelArgs) {
-
+	contentLength := [4]byte{}
+	binary.LittleEndian.PutUint32(contentLength[:], uint32(len(buf)))
+	_, err = conn.Write(contentLength[:])
+	if err != nil {
+		panic(err)
+	}
+	_, err = conn.Write(buf)
+	if err != nil {
+		panic(err)
+	}
 }
