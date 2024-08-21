@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/aes"
 	"flag"
 	"fmt"
 	"os"
@@ -20,6 +21,14 @@ func main() {
 	flag.Parse()
 	fmt.Printf("\n\ntunnel.Args: %+v\n\n\n", tunnel.Args)
 	validate()
+	if tunnel.Args.Secret != "" {
+		block, err := aes.NewCipher([]byte(tunnel.Args.Secret)[0:32])
+		if err != nil {
+			fmt.Printf("aes.NewCipher error:%+v\n", err)
+			os.Exit(1)
+		}
+		tunnel.Block = block
+	}
 	if tunnel.Args.Mode == "tunnel" {
 		tunnel.MakeTunnel()
 	} else if tunnel.Args.Mode == "client" {
@@ -37,11 +46,6 @@ func validate() {
 
 	if tunnel.Args.Mode == "Server" && tunnel.Args.Host == "" {
 		fmt.Println("host property is required when mode property is server, and its values should comply to <bind-address>:<port> format.")
-		os.Exit(1)
-	}
-
-	if tunnel.Args.Secret == "" {
-		fmt.Println("secret property must be always set. It is used by control tcp connection to authenticate clients.")
 		os.Exit(1)
 	}
 

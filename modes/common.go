@@ -1,6 +1,9 @@
 package tunnel
 
 import (
+	"crypto/cipher"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 )
@@ -20,6 +23,7 @@ func NewTunnelArgs() TunnelArgs {
 }
 
 var Args = NewTunnelArgs()
+var Block cipher.Block = nil
 
 func handleTunnelConn(readConn net.Conn, writeConn net.Conn, finish chan int) {
 	defer func() {
@@ -55,4 +59,103 @@ func handleTunnelConn(readConn net.Conn, writeConn net.Conn, finish chan int) {
 			writeSize += n
 		}
 	}
+}
+
+func writeConn(conn net.Conn, message map[string]string) int {
+	var messageSize int
+	var buffer []byte = nil
+	payload, err := json.Marshal(message)
+	if err != nil {
+		fmt.Printf("json.Marshal error: %+v", err)
+	}
+	contentLength := len(payload)
+
+	if Block != nil {
+		paddingByte := (contentLength + 4) % Block.BlockSize()
+		contentLength := contentLength
+		buffer = make([]byte, 0, contentLength+4+paddingByte)
+		binary.LittleEndian.PutUint32(buffer[0:4], uint32(contentLength))
+		buffer = buffer[:4]
+		buffer = append(buffer, payload...)
+		buffer = append(buffer, make([]byte, paddingByte)...)
+		Block.Encrypt(buffer, buffer)
+	} else {
+		contentLength := contentLength
+		buffer = make([]byte, 0, contentLength+4)
+		binary.LittleEndian.PutUint32(buffer[0:4], uint32(contentLength))
+		buffer = buffer[:4]
+		buffer = append(buffer, payload...)
+	}
+
+	messageSize = len(buffer)
+	writeSize := 0
+	for writeSize < messageSize {
+		n, err := conn.Write(buffer[writeSize:messageSize])
+		if err != nil {
+			fmt.Printf("conn error:%+v\n", err)
+			panic(err)
+		}
+		writeSize += n
+	}
+
+	return messageSize
+}
+
+func readConn(conn net.Conn, message *map[string]string) {
+	var contentLength int
+	var messageLength int
+	var buffer []byte = nil
+
+	if Block != nil {
+		firstBlock := make([]byte, Block.BlockSize(), Block.BlockSize())
+		readSize := 0
+		for readSize < Block.BlockSize() {
+			n, err := conn.Read(firstBlock)
+			if err != nil {
+				fmt.Printf("conn.Read error: %+v\n", err)
+				panic(err)
+			}
+			readSize += n
+		}
+		firstBlockDecrpted := make([]byte, Block.BlockSize(), Block.BlockSize())
+		Block.Decrypt(firstBlockDecrpted, firstBlock)
+		contentLength = int(binary.LittleEndian.Uint32(firstBlockDecrpted[0:4]))
+		messageLength = contentLength + 4 + (contentLength+4)%Block.BlockSize()
+		buffer = make([]byte, 0, messageLength)
+		_ = append(buffer, firstBlock...)
+		for readSize < messageLength {
+			n, err := conn.Read(buffer[readSize:messageLength])
+			if err != nil {
+				fmt.Printf("conn.Read error: %+v\n", err)
+				panic(err)
+			}
+			readSize += n
+		}
+		Block.Decrypt(buffer[:messageLength], buffer[:messageLength])
+	} else {
+		size := make([]byte, 4, 4)
+		readSize := 0
+		for readSize < 4 {
+			n, err := conn.Read(size)
+			if err != nil {
+				fmt.Printf("conn.Read error: %+v\n", err)
+				panic(err)
+			}
+			readSize += n
+		}
+		contentLength = int(binary.LittleEndian.Uint32(size))
+		messageLength = contentLength + 4
+		buffer = make([]byte, contentLength+4, contentLength+4)
+		readSize = 4
+		for readSize < contentLength {
+			n, err := conn.Read(buffer[readSize : contentLength+4])
+			if err != nil {
+				fmt.Printf("conn.Read error: %+v\n", err)
+				panic(err)
+			}
+			readSize += n
+		}
+	}
+
+	json.Unmarshal(buffer[4:contentLength+4], &message)
 }

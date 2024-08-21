@@ -1,8 +1,7 @@
 package tunnel
 
 import (
-	"encoding/binary"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -30,17 +29,18 @@ func MakeServer() {
 			fmt.Printf("listener.Accept error: %+v\n", err)
 		}
 		fmt.Printf("%s Accept, connection: %+v\n", Args.Host, conn.RemoteAddr())
-		go handleControllerConn(conn, Args)
+		go handleControllerConn(conn)
 	}
 }
 
-func handleControllerConn(conn net.Conn, args TunnelArgs) {
+func handleControllerConn(conn net.Conn) {
 	var listener net.Listener = nil
 	var err error = nil
 	var errChan = make(chan error)
 
 	defer func() {
 		err := recover()
+		fmt.Printf("handleControllerConn defer error: %+v\n", err)
 		close(errChan)
 		errChan = nil
 		if listener != nil {
@@ -64,59 +64,38 @@ func handleControllerConn(conn net.Conn, args TunnelArgs) {
 			clients = append(clients[:index], clients[index+1:]...)
 		}
 	}()
-	var buffer [2048]byte
 	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
-
-	readSize, err := conn.Read(buffer[:4])
-	if err != nil {
-		fmt.Printf("conn.Read error: %+v\n", err)
+	message := make(map[string]string)
+	readConn(conn, &message)
+	if message["type"] != "CONFIGURE_CLIENT" {
+		fmt.Printf("PROTOCOL ERROR message %+v\n", message)
 		panic(err)
 	}
-	readSize = 0
-	contentLength := binary.LittleEndian.Uint32(buffer[0:4])
-	for readSize < int(contentLength) {
-		chunkReadSize, err := conn.Read(buffer[readSize:contentLength])
-		if err != nil {
-			fmt.Printf("conn.Read error: %+v\n", err)
-			panic(err)
-		}
-		readSize += chunkReadSize
-	}
-
-	payload := make(map[string]string)
-	err = json.Unmarshal(buffer[:contentLength], &payload)
-	if err != nil {
-		fmt.Printf("json.Unmarshal error: %+v\n", err)
-		panic(err)
-	}
-	if payload["type"] != "CONFIGURE_CLIENT" {
-		fmt.Printf("PROTOCOL ERROR message %+v\n", payload)
-		panic(err)
-	}
-	fmt.Printf("payload: %+v\n", payload)
-	listener, err = net.Listen("tcp", payload["target"])
+	listener, err = net.Listen("tcp", message["target"])
 	if err != nil {
 		fmt.Printf("net.Listen error: %+v\n", err)
 		panic(err)
 	}
 	client := ClientConfig{listerner: listener, controllerConn: conn, idleConns: make([]net.Conn, 0, 100)}
 	clients = append(clients, client)
-	for i := 0; args.MinIdleConnection-len(client.idleConns) > i; i++ {
+	for i := 0; Args.MinIdleConnection-len(client.idleConns) > i; i++ {
 		sendNewConn(conn, client)
 	}
 
 	go func() {
-		buffer := [1024]byte{}
+		defer func() {
+			err := recover()
+			switch v := err.(type) {
+			case error:
+				errChan <- v
+			default:
+				errChan <- errors.New("unknown recover")
+			}
+		}()
 		for {
 			conn.SetReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 10))
-			_, err = conn.Read(buffer[:])
-			if err != nil {
-				fmt.Printf("conn.Read error: %+v\n", err)
-				if errChan != nil {
-					errChan <- err
-					return
-				}
-			}
+			message := make(map[string]string)
+			readConn(conn, &message)
 		}
 	}()
 
@@ -130,7 +109,7 @@ func handleControllerConn(conn net.Conn, args TunnelArgs) {
 				}
 				return
 			}
-			fmt.Printf("%s Accept, connection: %+v\n", payload["target"], conn.RemoteAddr())
+			fmt.Printf("%s Accept, connection: %+v\n", message["target"], conn.RemoteAddr())
 			if strings.Split(tunnelConn.RemoteAddr().String(), ":")[0] == strings.Split(conn.RemoteAddr().String(), ":")[0] {
 				client.idleConns = append(client.idleConns, tunnelConn)
 			} else {
@@ -156,19 +135,5 @@ func handleControllerConn(conn net.Conn, args TunnelArgs) {
 func sendNewConn(conn net.Conn, client ClientConfig) {
 	message := make(map[string]string)
 	message["type"] = "MAKE_NEW_CONNECTION"
-	buf, err := json.Marshal(message)
-	if err != nil {
-		fmt.Printf("json.Marshal error:%+v\n", err)
-		panic(err)
-	}
-	contentLength := [4]byte{}
-	binary.LittleEndian.PutUint32(contentLength[:], uint32(len(buf)))
-	_, err = conn.Write(contentLength[:])
-	if err != nil {
-		panic(err)
-	}
-	_, err = conn.Write(buf)
-	if err != nil {
-		panic(err)
-	}
+	writeConn(conn, message)
 }
