@@ -1,9 +1,10 @@
-package tunnel
+package utils
 
 import (
 	"crypto/cipher"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 )
@@ -25,21 +26,25 @@ func NewTunnelArgs() TunnelArgs {
 var Args = NewTunnelArgs()
 var Block cipher.Block = nil
 
-func handleTunnelConn(readConn net.Conn, writeConn net.Conn, finish chan int) {
+func HandleTunnelConn(readConn net.Conn, writeConn net.Conn, finish chan int) {
 	defer func() {
 		err := recover()
 		if err != nil {
-			err = readConn.Close()
-			if err != nil {
-				fmt.Printf("readConn.Close error: %+v\n", err)
+			switch err := err.(type) {
+			case error:
+				err = readConn.Close()
+				if err != nil && !errors.Is(err, net.ErrClosed) {
+					fmt.Printf("readConn.Close error: %+v\n", err)
+				}
+				err = writeConn.Close()
+				if err != nil && !errors.Is(err, net.ErrClosed) {
+					fmt.Printf("writeConn.Close error: %+v\n", err)
+				}
+				if finish != nil {
+					finish <- 1
+				}
 			}
-			err = writeConn.Close()
-			if err != nil {
-				fmt.Printf("writeConn.Close error: %+v\n", err)
-			}
-			if finish != nil {
-				finish <- 1
-			}
+
 		}
 	}()
 	var buffer [2048]byte
@@ -61,7 +66,7 @@ func handleTunnelConn(readConn net.Conn, writeConn net.Conn, finish chan int) {
 	}
 }
 
-func writeConn(conn net.Conn, message map[string]string) int {
+func WriteConn(conn net.Conn, message map[string]string) int {
 	var messageSize int
 	var buffer []byte = nil
 	payload, err := json.Marshal(message)
@@ -101,7 +106,7 @@ func writeConn(conn net.Conn, message map[string]string) int {
 	return messageSize
 }
 
-func readConn(conn net.Conn, message *map[string]string) {
+func ReadConn(conn net.Conn, message *map[string]string) {
 	var contentLength int
 	var messageLength int
 	var buffer []byte = nil

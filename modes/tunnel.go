@@ -3,10 +3,12 @@ package tunnel
 import (
 	"fmt"
 	"net"
+
+	"github.com/tarikcarli/go-tunnel/utils"
 )
 
 func MakeTunnel() {
-	listener, err := net.Listen("tcp", Args.Host)
+	listener, err := net.Listen("tcp", utils.Args.Host)
 	if err != nil {
 		fmt.Printf("net.Listen error: %+v\n", err)
 	}
@@ -17,7 +19,7 @@ func MakeTunnel() {
 			continue
 		}
 		fmt.Printf("Accept, connection: %+v\n", incomingConn.RemoteAddr())
-		outgoingConn, err := net.Dial("tcp", Args.Source)
+		outgoingConn, err := net.Dial("tcp", utils.Args.Source)
 		if err != nil {
 			fmt.Printf("net.Dial error: %+v\n", err)
 			err = incomingConn.Close()
@@ -26,7 +28,7 @@ func MakeTunnel() {
 			}
 			continue
 		}
-		go handleTunnelConn(incomingConn, outgoingConn, nil)
-		go handleTunnelConn(outgoingConn, incomingConn, nil)
+		go utils.HandleTunnelConn(incomingConn, outgoingConn, nil)
+		go utils.HandleTunnelConn(outgoingConn, incomingConn, nil)
 	}
 }

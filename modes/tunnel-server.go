@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/tarikcarli/go-tunnel/utils"
 )
 
 type ClientConfig struct {
@@ -18,7 +20,7 @@ type ClientConfig struct {
 var clients []ClientConfig
 
 func MakeServer() {
-	listener, err := net.Listen("tcp", Args.Host)
+	listener, err := net.Listen("tcp", utils.Args.Host)
 	if err != nil {
 		fmt.Printf("net.Listen error: %+v\n", err)
 		os.Exit(1)
@@ -28,7 +30,7 @@ func MakeServer() {
 		if err != nil {
 			fmt.Printf("listener.Accept error: %+v\n", err)
 		}
-		fmt.Printf("%s Accept, connection: %+v\n", Args.Host, conn.RemoteAddr())
+		fmt.Printf("%s Accept, connection: %+v\n", utils.Args.Host, conn.RemoteAddr())
 		go handleControllerConn(conn)
 	}
 }
@@ -66,7 +68,7 @@ func handleControllerConn(conn net.Conn) {
 	}()
 	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 	message := make(map[string]string)
-	readConn(conn, &message)
+	utils.ReadConn(conn, &message)
 	if message["type"] != "CONFIGURE_CLIENT" {
 		fmt.Printf("PROTOCOL ERROR message %+v\n", message)
 		panic(err)
@@ -78,7 +80,7 @@ func handleControllerConn(conn net.Conn) {
 	}
 	client := ClientConfig{listerner: listener, controllerConn: conn, idleConns: make([]net.Conn, 0, 100)}
 	clients = append(clients, client)
-	for i := 0; Args.MinIdleConnection-len(client.idleConns) > i; i++ {
+	for i := 0; utils.Args.MinIdleConnection-len(client.idleConns) > i; i++ {
 		sendNewConn(conn, client)
 	}
 
@@ -95,7 +97,7 @@ func handleControllerConn(conn net.Conn) {
 		for {
 			conn.SetReadDeadline(time.Now().Add(time.Hour * 24 * 365 * 10))
 			message := make(map[string]string)
-			readConn(conn, &message)
+			utils.ReadConn(conn, &message)
 		}
 	}()
 
@@ -122,8 +124,8 @@ func handleControllerConn(conn net.Conn) {
 					idleConn := client.idleConns[0]
 					client.idleConns = append(client.idleConns[:0], client.idleConns[1:]...)
 					sendNewConn(conn, client)
-					go handleTunnelConn(tunnelConn, idleConn, nil)
-					go handleTunnelConn(idleConn, tunnelConn, nil)
+					go utils.HandleTunnelConn(tunnelConn, idleConn, nil)
+					go utils.HandleTunnelConn(idleConn, tunnelConn, nil)
 				}
 			}
 		}
@@ -135,5 +137,5 @@ func handleControllerConn(conn net.Conn) {
 func sendNewConn(conn net.Conn, client ClientConfig) {
 	message := make(map[string]string)
 	message["type"] = "MAKE_NEW_CONNECTION"
-	writeConn(conn, message)
+	utils.WriteConn(conn, message)
 }
